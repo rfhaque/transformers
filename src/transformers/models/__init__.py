@@ -118,6 +118,8 @@ if TYPE_CHECKING:
     from .encoder_decoder import *
     from .ernie import *
     from .esm import *
+    from .esmc import *
+    from .esmfold2 import *
     from .evolla import *
     from .exaone4 import *
     from .falcon import *
