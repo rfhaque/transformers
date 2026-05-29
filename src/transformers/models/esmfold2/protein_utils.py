@@ -12,18 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Self-contained protein featurization for ESMFold2 inference.
-
-Lets ``ESMFold2ExperimentalModel.infer_protein_as_pdb`` fold a protein sequence
-ESMFold-style without the ``esm`` companion package. The featurization
-mirrors ``ESMFold2InputBuilder.prepare_input`` for the protein-only path —
-``test_prepare_protein_features.py`` enforces tensor-exact parity.
-"""
+"""Self-contained protein featurization for ESMFold2 inference."""
 
 from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -486,3 +481,102 @@ def prepare_protein_features(sequence: str) -> dict[str, Tensor]:
         "deletion_mean": deletion_mean,
     }
     return {k: v.unsqueeze(0) for k, v in features.items()}
+
+
+# 0-32 res_type → 3-letter name (only protein indices 2-22 are populated).
+_RES_TYPE_TO_3LETTER: dict[int, str] = {
+    rt: three for three, rt in PROTEIN_RESIDUE_TO_RES_TYPE.items()
+}
+_RES_TYPE_TO_3LETTER[PROTEIN_UNK_RES_TYPE] = "UNK"
+
+# Featurization keys that ``output_to_pdb`` reads off the forward output.
+# ``infer_protein`` re-attaches them because ``forward`` does not echo them
+# back; both ESMFold2 model classes share this list.
+OUTPUT_TO_PDB_FEATURE_KEYS: tuple[str, ...] = (
+    "res_type",
+    "atom_to_token",
+    "ref_atom_name_chars",
+    "atom_attention_mask",
+    "token_attention_mask",
+    "residue_index",
+)
+
+
+def output_to_pdb(output: dict) -> str:
+    """Convert an ESMFold2 protein forward output into a PDB string.
+
+    Expects ``output`` to carry the featurization keys re-attached by
+    ``infer_protein`` (``res_type``, ``atom_to_token``,
+    ``ref_atom_name_chars``, ``atom_attention_mask``,
+    ``token_attention_mask``, ``residue_index``) alongside the predicted
+    ``sample_atom_coords`` and ``plddt``. Builds a 37-atom
+    ``OFProtein`` (per-atom pLDDT in the b-factor column) and renders it
+    with the OpenFold utilities shipped in ``transformers.models.esm``.
+    """
+    from transformers.models.esm.openfold_utils import OFProtein, to_pdb
+    from transformers.models.esm.openfold_utils import residue_constants as rc
+
+    coords = output["sample_atom_coords"]
+    if coords.dim() == 4:
+        coords = coords[:, 0]
+    coords = coords.detach().cpu().numpy()[0]
+
+    plddt = output["plddt"].detach().cpu().numpy()[0]
+    atom_to_token = output["atom_to_token"].cpu().numpy()
+    ref_chars = output["ref_atom_name_chars"].cpu().numpy()
+    res_type = output["res_type"].cpu().numpy()
+    token_mask = output["token_attention_mask"].cpu().numpy().astype(bool)
+    atom_mask_in = output["atom_attention_mask"].cpu().numpy().astype(bool)
+    residue_index_arr = output["residue_index"].cpu().numpy()
+
+    if atom_to_token.ndim == 2:
+        atom_to_token = atom_to_token[0]
+        ref_chars = ref_chars[0]
+        res_type = res_type[0]
+        token_mask = token_mask[0]
+        atom_mask_in = atom_mask_in[0]
+        residue_index_arr = residue_index_arr[0]
+
+    valid_tok = np.where(token_mask)[0]
+    n_res = valid_tok.shape[0]
+
+    aatype = np.full(n_res, rc.restype_order_with_x["X"], dtype=np.int64)
+    for new_i, t in enumerate(valid_tok):
+        rt = int(res_type[t])
+        three = _RES_TYPE_TO_3LETTER.get(rt)
+        if three is None or three == "UNK":
+            aatype[new_i] = rc.restype_order_with_x["X"]
+        else:
+            one = rc.restype_3to1.get(three, "X")
+            aatype[new_i] = rc.restype_order_with_x[one]
+
+    atom_positions = np.zeros((n_res, 37, 3), dtype=np.float32)
+    atom_mask = np.zeros((n_res, 37), dtype=np.float32)
+    b_factors = np.zeros((n_res, 37), dtype=np.float32)
+    tok_to_new = {int(t): i for i, t in enumerate(valid_tok)}
+
+    for a in range(atom_to_token.shape[0]):
+        if not atom_mask_in[a]:
+            continue
+        tok = int(atom_to_token[a])
+        if tok not in tok_to_new:
+            continue
+        new_i = tok_to_new[tok]
+        name = "".join(
+            chr(int(c) + 32) if int(c) != 0 else " " for c in ref_chars[a]
+        ).strip()
+        idx37 = rc.atom_order.get(name)
+        if idx37 is None:
+            continue
+        atom_positions[new_i, idx37] = coords[a]
+        atom_mask[new_i, idx37] = 1.0
+        b_factors[new_i, idx37] = float(plddt[tok])
+
+    pred = OFProtein(
+        aatype=aatype,
+        atom_positions=atom_positions,
+        atom_mask=atom_mask,
+        residue_index=residue_index_arr[valid_tok].astype(np.int32) + 1,
+        b_factors=b_factors,
+    )
+    return to_pdb(pred)

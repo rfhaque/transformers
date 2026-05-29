@@ -1040,11 +1040,23 @@ class ESMFold2Model(PreTrainedModel):
 
     @torch.no_grad()
     def infer_protein(self, seq: str, **forward_kwargs) -> dict:
-        from .protein_utils import prepare_protein_features
+        from .protein_utils import OUTPUT_TO_PDB_FEATURE_KEYS, prepare_protein_features
 
         features = prepare_protein_features(seq)
         features = {k: v.to(self.device) for k, v in features.items()}
-        return self(**features, **forward_kwargs)
+        output = self(**features, **forward_kwargs)
+        for k in OUTPUT_TO_PDB_FEATURE_KEYS:
+            output[k] = features[k]
+        return output
+
+    def infer_protein_as_pdb(self, seq: str, **forward_kwargs) -> str:
+        return self.output_to_pdb(self.infer_protein(seq, **forward_kwargs))
+
+    @staticmethod
+    def output_to_pdb(output: dict) -> str:
+        from .protein_utils import output_to_pdb as _output_to_pdb
+
+        return _output_to_pdb(output)
 
 
 class MSAEncoderBlock(nn.Module):

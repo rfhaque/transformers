@@ -556,13 +556,24 @@ class SWA3DRoPEAttention(nn.Module):
                 window_size=(self.half_window, self.half_window),
             )
         else:
-            # Fallback: standard attention (no SWA)
-            q_t = q.transpose(1, 2)
-            k_t = k.transpose(1, 2)
-            v_t = v.transpose(1, 2)
-            attn = torch.matmul(q_t, k_t.transpose(-2, -1)) * self.scale
-            attn = F.softmax(attn, dim=-1)
-            out = torch.matmul(attn, v_t).transpose(1, 2)
+            if len(attention_params) > 2:
+                valid = torch.zeros(B * N, dtype=torch.bool, device=q.device)
+                valid[attention_params[2]] = True
+                valid = valid.view(B, N)
+            else:
+                valid = torch.ones(B, N, dtype=torch.bool, device=q.device)
+            rank = torch.cumsum(valid, dim=1) - 1
+            within = (rank.unsqueeze(2) - rank.unsqueeze(1)).abs() <= self.half_window
+            allowed = within & valid.unsqueeze(1) & valid.unsqueeze(2)
+            allowed |= torch.eye(N, dtype=torch.bool, device=q.device)
+            out = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                attn_mask=allowed.unsqueeze(1),
+                scale=self.scale,
+            ).transpose(1, 2)
+            out = out * valid.unsqueeze(-1).unsqueeze(-1)
 
         out = out.to(input_dtype).reshape(B, N, -1)  # type: ignore[union-attr]
         out = out * torch.sigmoid(self.gate_proj(x_input))
