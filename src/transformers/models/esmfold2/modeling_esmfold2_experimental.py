@@ -612,19 +612,12 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
 
     @torch.no_grad()
     def infer_protein(self, seq: str, **forward_kwargs) -> dict:
-        from .protein_utils import prepare_protein_features
+        from .protein_utils import OUTPUT_TO_PDB_FEATURE_KEYS, prepare_protein_features
 
         features = prepare_protein_features(seq)
         features = {k: v.to(self.device) for k, v in features.items()}
         output = self(**features, **forward_kwargs)
-        for k in (
-            "res_type",
-            "atom_to_token",
-            "ref_atom_name_chars",
-            "atom_attention_mask",
-            "token_attention_mask",
-            "residue_index",
-        ):
+        for k in OUTPUT_TO_PDB_FEATURE_KEYS:
             output[k] = features[k]
         return output
 
@@ -746,98 +739,9 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
 
     @staticmethod
     def output_to_pdb(output: dict) -> str:
-        from transformers.models.esm.openfold_utils import OFProtein, to_pdb
-        from transformers.models.esm.openfold_utils import residue_constants as rc
+        from .protein_utils import output_to_pdb as _output_to_pdb
 
-        # 0-32 res_type → 3-letter name (only protein indices 2-22 are populated)
-        res_type_to_3letter = {
-            2: "ALA",
-            3: "ARG",
-            4: "ASN",
-            5: "ASP",
-            6: "CYS",
-            7: "GLN",
-            8: "GLU",
-            9: "GLY",
-            10: "HIS",
-            11: "ILE",
-            12: "LEU",
-            13: "LYS",
-            14: "MET",
-            15: "PHE",
-            16: "PRO",
-            17: "SER",
-            18: "THR",
-            19: "TRP",
-            20: "TYR",
-            21: "VAL",
-            22: "UNK",
-        }
-
-        coords = output["sample_atom_coords"]
-        if coords.dim() == 4:
-            coords = coords[:, 0]
-        coords = coords.detach().cpu().numpy()[0]
-
-        plddt = output["plddt"].detach().cpu().numpy()[0]
-        atom_to_token = output["atom_to_token"].cpu().numpy()
-        ref_chars = output["ref_atom_name_chars"].cpu().numpy()
-        res_type = output["res_type"].cpu().numpy()
-        token_mask = output["token_attention_mask"].cpu().numpy().astype(bool)
-        atom_mask_in = output["atom_attention_mask"].cpu().numpy().astype(bool)
-        residue_index_arr = output["residue_index"].cpu().numpy()
-
-        if atom_to_token.ndim == 2:
-            atom_to_token = atom_to_token[0]
-            ref_chars = ref_chars[0]
-            res_type = res_type[0]
-            token_mask = token_mask[0]
-            atom_mask_in = atom_mask_in[0]
-            residue_index_arr = residue_index_arr[0]
-
-        valid_tok = np.where(token_mask)[0]
-        n_res = valid_tok.shape[0]
-
-        aatype = np.full(n_res, rc.restype_order_with_x["X"], dtype=np.int64)
-        for new_i, t in enumerate(valid_tok):
-            rt = int(res_type[t])
-            three = res_type_to_3letter.get(rt)
-            if three is None or three == "UNK":
-                aatype[new_i] = rc.restype_order_with_x["X"]
-            else:
-                one = rc.restype_3to1.get(three, "X")
-                aatype[new_i] = rc.restype_order_with_x[one]
-
-        atom_positions = np.zeros((n_res, 37, 3), dtype=np.float32)
-        atom_mask = np.zeros((n_res, 37), dtype=np.float32)
-        b_factors = np.zeros((n_res, 37), dtype=np.float32)
-        tok_to_new = {int(t): i for i, t in enumerate(valid_tok)}
-
-        for a in range(atom_to_token.shape[0]):
-            if not atom_mask_in[a]:
-                continue
-            tok = int(atom_to_token[a])
-            if tok not in tok_to_new:
-                continue
-            new_i = tok_to_new[tok]
-            name = "".join(
-                chr(int(c) + 32) if int(c) != 0 else " " for c in ref_chars[a]
-            ).strip()
-            idx37 = rc.atom_order.get(name)
-            if idx37 is None:
-                continue
-            atom_positions[new_i, idx37] = coords[a]
-            atom_mask[new_i, idx37] = 1.0
-            b_factors[new_i, idx37] = float(plddt[tok])
-
-        pred = OFProtein(
-            aatype=aatype,
-            atom_positions=atom_positions,
-            atom_mask=atom_mask,
-            residue_index=residue_index_arr[valid_tok].astype(np.int32) + 1,
-            b_factors=b_factors,
-        )
-        return to_pdb(pred)
+        return _output_to_pdb(output)
 
     def _compute_lm_hidden_states(
         self,
