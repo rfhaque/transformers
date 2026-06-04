@@ -720,6 +720,7 @@ class ESMFold2Model(PreTrainedModel):
         residue_index: Tensor,
         mol_type: Tensor,
         tok_mask: Tensor,
+        lm_mask_pct: float = 0.0,
     ) -> Tensor:
         assert self._esmc is not None
         # fp8 TE kernels require prod(shape[:-1]) % 8 == 0.
@@ -733,6 +734,7 @@ class ESMFold2Model(PreTrainedModel):
                 mol_type,
                 tok_mask,
                 pad_to_multiple=pad_to,
+                lm_mask_pct=lm_mask_pct,
             )
 
     def _discretized_dynamics(self) -> tuple[Tensor, Tensor]:
@@ -836,6 +838,7 @@ class ESMFold2Model(PreTrainedModel):
         num_loops: int | None = None,
         num_diffusion_samples: int | None = None,
         num_sampling_steps: int | None = None,
+        lm_mask_pct: float | None = None,
         **kwargs,
     ) -> dict[str, Tensor]:
         tok_mask = token_attention_mask
@@ -922,7 +925,16 @@ class ESMFold2Model(PreTrainedModel):
                 and self._esmc is not None
             ):
                 lm_hidden_states = self._compute_lm_hidden_states(
-                    input_ids, asym_id, residue_index, mol_type, tok_mask
+                    input_ids,
+                    asym_id,
+                    residue_index,
+                    mol_type,
+                    tok_mask,
+                    lm_mask_pct=(
+                        lm_mask_pct
+                        if lm_mask_pct is not None
+                        else self.config.lm_mask_pct
+                    ),
                 )
             lm_z: Tensor | None = None
             if lm_hidden_states is not None:

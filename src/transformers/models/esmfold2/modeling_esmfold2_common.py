@@ -1739,11 +1739,11 @@ class DiffusionStructureHead(nn.Module):
     ) -> dict[str, Tensor | None]:
         """Diffusion sampling (Algorithm 18).
 
-        ``num_sampling_steps`` is the number of denoising steps actually run.
-        When ``max_inference_sigma`` is set, the Karras schedule built with
-        ``num_sampling_steps`` entries would lose its high-σ tail to the cap,
-        so we inflate the underlying schedule length here to land back at the
-        requested step count post-truncation.
+        The Karras schedule is built with ``num_sampling_steps`` entries, then
+        clipped to ``max_inference_sigma`` (the high-σ tail above the cap is
+        dropped and the cap prepended). The number of denoising steps actually
+        run is therefore fewer than ``num_sampling_steps`` whenever the schedule
+        extends above the cap.
         """
         n_atoms = tok_idx.shape[1]
         device = s_inputs.device
@@ -2167,6 +2167,8 @@ def compute_lm_hidden_states(
     mol_type: Tensor,
     token_mask: Tensor,
     pad_to_multiple: int | None = None,
+    lm_mask_pct: float = 0.0,
+    mask_token_id: int = 32,
 ) -> Tensor:
     """Run ESMC with BOS/EOS wrapping, return hidden states [B, L, N, D] with N=81 layers.
 
@@ -2255,6 +2257,15 @@ def compute_lm_hidden_states(
     # sequence_id for chain-aware attention; PAD tokens get -1 (no attention).
     sequence_id = (lm_input_ids == 0).cumsum(dim=1) - 1  # BOS=0
     sequence_id = sequence_id.masked_fill(lm_input_ids == 1, -1)  # PAD=1
+
+    if lm_mask_pct > 0.0:
+        # Randomly corrupt residues with the LM mask token, matching training;
+        # BOS/EOS/PAD (ids 0/2/1) are never masked so chain structure is kept.
+        special = (lm_input_ids == 0) | (lm_input_ids == 1) | (lm_input_ids == 2)
+        do_mask = (
+            torch.rand(lm_input_ids.shape, device=device) < lm_mask_pct
+        ) & ~special
+        lm_input_ids = lm_input_ids.masked_fill(do_mask, mask_token_id)
 
     with torch.inference_mode():
         esmc_out = esmc(

@@ -579,6 +579,16 @@ def _make_attn_out_proj(d_model: int, bias: bool) -> nn.Module:
     return nn.Linear(d_model, d_model, bias=bias)
 
 
+def _drop_te_extra_state(
+    module: nn.Module, state_dict: dict, prefix: str, local_metadata: dict
+) -> None:
+    """Strip Transformer Engine's non-tensor ``_extra_state``; TE <2.0 returns
+    it as an ``io.BytesIO`` that the checkpoint loader cannot dtype-infer."""
+    for key in list(state_dict):
+        if key.endswith("_extra_state"):
+            del state_dict[key]
+
+
 def _gelu_ln_ffn(d_model: int, expansion_ratio: float, bias: bool) -> nn.Sequential:
     hidden = int(expansion_ratio * d_model)
     return nn.Sequential(
@@ -980,6 +990,10 @@ class ESMCPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["UnifiedTransformerBlock"]
     _keys_to_ignore_on_load_unexpected = [r"\._extra_state$"]
 
+    def post_init(self):
+        super().post_init()
+        self._register_state_dict_hook(_drop_te_extra_state)
+
     def _init_weights(self, module: nn.Module):
         std = self.config.initializer_range
         if isinstance(module, nn.Linear):
@@ -1160,8 +1174,8 @@ class ESMCModel(ESMCPreTrainedModel):
         ```python
         >>> from transformers import AutoTokenizer, ESMCModel
 
-        >>> model = ESMCModel.from_pretrained("Biohub/ESMC-600M-2024-12")
-        >>> tokenizer = AutoTokenizer.from_pretrained("Biohub/ESMC-600M-2024-12")
+        >>> model = ESMCModel.from_pretrained("biohub/ESMC-600M-2024-12")
+        >>> tokenizer = AutoTokenizer.from_pretrained("biohub/ESMC-600M-2024-12")
         >>> inputs = tokenizer(["MLKNVQVQLV"], return_tensors="pt")
         >>> outputs = model(**inputs)
         >>> outputs.last_hidden_state.shape
@@ -1362,8 +1376,8 @@ class ESMCForMaskedLM(ESMCPreTrainedModel):
         >>> from transformers import AutoTokenizer, ESMCForMaskedLM
         >>> import torch
 
-        >>> model = ESMCForMaskedLM.from_pretrained("Biohub/ESMC-600M-2024-12")
-        >>> tokenizer = AutoTokenizer.from_pretrained("Biohub/ESMC-600M-2024-12")
+        >>> model = ESMCForMaskedLM.from_pretrained("biohub/ESMC-600M-2024-12")
+        >>> tokenizer = AutoTokenizer.from_pretrained("biohub/ESMC-600M-2024-12")
         >>> inputs = tokenizer(["MLKNVQ<mask>LV"], return_tensors="pt")
         >>> outputs = model(**inputs)
         >>> outputs.logits.shape

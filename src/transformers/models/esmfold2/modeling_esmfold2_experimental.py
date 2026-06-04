@@ -750,11 +750,18 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
         residue_index: Tensor,
         mol_type: Tensor,
         token_mask: Tensor,
+        lm_mask_pct: float = 0.0,
     ) -> Tensor:
         """Run ESMC with BOS/EOS wrapping, return hidden states [B, L, N, D] with N=81 layers."""
         assert self._esmc is not None
         return compute_lm_hidden_states(
-            self._esmc, input_ids, asym_id, residue_index, mol_type, token_mask
+            self._esmc,
+            input_ids,
+            asym_id,
+            residue_index,
+            mol_type,
+            token_mask,
+            lm_mask_pct=lm_mask_pct,
         )
 
     def forward(
@@ -793,6 +800,7 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
         num_loops: int | None = None,
         num_diffusion_samples: int | None = None,
         num_sampling_steps: int | None = None,
+        lm_mask_pct: float | None = None,
         early_exit: bool = False,
         seed: int | None = None,
         **kwargs,
@@ -913,7 +921,16 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
                 and self._esmc is not None
             ):
                 lm_hidden_states = self._compute_lm_hidden_states(
-                    input_ids, asym_id, residue_index, mol_type, tok_mask
+                    input_ids,
+                    asym_id,
+                    residue_index,
+                    mol_type,
+                    tok_mask,
+                    lm_mask_pct=(
+                        lm_mask_pct
+                        if lm_mask_pct is not None
+                        else self.config.lm_mask_pct
+                    ),
                 )
             if lm_hidden_states is not None:
                 lm_z = self.language_model(
