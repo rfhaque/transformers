@@ -185,7 +185,7 @@ class ESMFold2Config(PretrainedConfig):
             Number of bins for relative residue index encoding.
         n_relative_chain_bins (`int`, defaults to 2):
             Number of bins for relative chain encoding.
-        num_loops (`int`, defaults to 10):
+        num_loops (`int`, defaults to 20):
             Number of trunk loops for iterative refinement.
         num_diffusion_samples (`int`, defaults to 8):
             Number of parallel structure predictions to generate.
@@ -196,6 +196,10 @@ class ESMFold2Config(PretrainedConfig):
         force_lm_dropout_during_inference (`bool`, defaults to False):
             When True, apply ``lm_dropout`` even when ``model.eval()`` and
             ``lm_dropout`` > 0. Binder-design loads set this to True.
+        lm_mask_pct (`float`, defaults to 0.0):
+            Fraction of sequence residues randomly replaced with the LM mask
+            token before running the PLM backbone, matching the training-time
+            input corruption. Single-sequence checkpoints set this to 0.1.
         disable_msa_features (`bool`, defaults to False):
             When True, zero out MSA-derived ``profile`` and ``deletion_mean``
             before the inputs embedder (experimental medium/large checkpoints).
@@ -230,7 +234,9 @@ class ESMFold2Config(PretrainedConfig):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self.type: str = kwargs["type"]
+        # Default "release" so a bare ``ESMFold2Config()`` (used internally by
+        # HF's ``save_pretrained``) doesn't raise ``KeyError('type')``.
+        self.type: str = kwargs.get("type", "release")
         if self.type not in ("release", "experimental"):
             raise ValueError(
                 f"ESMFold2Config.type must be 'release' or 'experimental', "
@@ -242,7 +248,7 @@ class ESMFold2Config(PretrainedConfig):
         self.d_pair: int = kwargs.get("d_pair", 256)
         self.n_relative_residx_bins: int = kwargs.get("n_relative_residx_bins", 32)
         self.n_relative_chain_bins: int = kwargs.get("n_relative_chain_bins", 2)
-        self.num_loops: int = kwargs.get("num_loops", 10)
+        self.num_loops: int = kwargs.get("num_loops", 20)
         self.num_diffusion_samples: int = kwargs.get("num_diffusion_samples", 8)
         # If True, ``profile`` / ``deletion_mean`` are zeroed before the inputs
         # embedder.
@@ -251,6 +257,7 @@ class ESMFold2Config(PretrainedConfig):
         self.force_lm_dropout_during_inference: bool = kwargs.get(
             "force_lm_dropout_during_inference", False
         )
+        self.lm_mask_pct: float = kwargs.get("lm_mask_pct", 0.0)
 
         self.lm_d_model: int = kwargs.get("lm_d_model", 2560)
         self.lm_num_layers: int = kwargs.get("lm_num_layers", 80)
