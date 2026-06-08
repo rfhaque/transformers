@@ -159,6 +159,61 @@ _DEFAULT_CHUNK_SIZE = 64
 
 
 # ===========================================================================
+# MSA inference-time diversity augmentations
+# ===========================================================================
+# Operate on encoder-input tensors of shape [B, depth, L] (depth = dim 1; ``msa``
+# may also be one-hot [B, depth, L, C]).
+
+
+def maybe_subsample_msa(
+    msa: Tensor,
+    msa_attention_mask: Tensor | None,
+    has_deletion: Tensor | None,
+    deletion_value: Tensor | None,
+    *,
+    max_depth: int | None,
+    enabled: bool,
+) -> tuple[Tensor, Tensor | None, Tensor | None, Tensor | None]:
+    """Randomly subsample the MSA to ``max_depth`` rows, keeping query row 0.
+
+    No-op when disabled, ``max_depth`` is None, or depth <= ``max_depth``.
+    """
+    if not enabled or max_depth is None:
+        return msa, msa_attention_mask, has_deletion, deletion_value
+    depth = msa.size(1)
+    if depth <= 1 or depth <= max_depth:
+        return msa, msa_attention_mask, has_deletion, deletion_value
+    indices = torch.zeros(max_depth, dtype=torch.long, device=msa.device)
+    perm = torch.randperm(depth - 1, device=msa.device)[: max_depth - 1]
+    indices[1:] = perm + 1
+    indices = indices.sort().values
+    msa = msa[:, indices]
+    if msa_attention_mask is not None:
+        msa_attention_mask = msa_attention_mask[:, indices]
+    if has_deletion is not None:
+        has_deletion = has_deletion[:, indices]
+    if deletion_value is not None:
+        deletion_value = deletion_value[:, indices]
+    return msa, msa_attention_mask, has_deletion, deletion_value
+
+
+def maybe_apply_msa_column_masking(
+    msa_attention_mask: Tensor | None, rate: float
+) -> Tensor | None:
+    """Mask fraction ``rate`` of MSA columns in non-query rows of
+    ``msa_attention_mask``, keeping query row 0. No-op when absent, ``rate <= 0``,
+    or depth <= 1.
+    """
+    if msa_attention_mask is None or rate <= 0.0 or msa_attention_mask.size(1) <= 1:
+        return msa_attention_mask
+    B, _M, L = msa_attention_mask.shape
+    col_keep = torch.rand(B, L, device=msa_attention_mask.device) >= rate
+    col_keep = col_keep.unsqueeze(1).expand_as(msa_attention_mask).clone()
+    col_keep[:, 0, :] = True
+    return msa_attention_mask.bool() & col_keep
+
+
+# ===========================================================================
 # Atom-token utilities
 # ===========================================================================
 

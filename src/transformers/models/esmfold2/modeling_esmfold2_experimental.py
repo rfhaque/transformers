@@ -51,6 +51,8 @@ from .modeling_esmfold2_common import (
     compute_lm_hidden_states,
     gather_rep_atom_coords,
     gather_token_to_atom,
+    maybe_apply_msa_column_masking,
+    maybe_subsample_msa,
 )
 
 _EPS = 1e-5
@@ -801,6 +803,9 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
         num_diffusion_samples: int | None = None,
         num_sampling_steps: int | None = None,
         lm_mask_pct: float | None = None,
+        msa_max_depth: int = 1024,
+        msa_column_mask_rate: float = 0.1,
+        msa_subsample_at_inference: bool = True,
         early_exit: bool = False,
         seed: int | None = None,
         **kwargs,
@@ -938,40 +943,22 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
                 )
                 z_init = z_init + lm_z.to(z_init.dtype)
 
-            # MSA tensors prepared once: encoder consumes [B, L, M, ...] layout.
-            _msa_kwargs: dict | None = None
+            # Inference-time MSA diversity: column mask is applied once here
+            # (shared across recycling loops); row subsampling is deferred to
+            # per-iter inside the loop below (fresh subset per loop).
+            _msa_inputs: dict | None = None
             if self.msa_encoder is not None and msa is not None:
-                if msa.dim() == 4:
-                    B_msa, M, L_msa, _ = msa.shape
-                    msa_oh = msa.permute(0, 2, 1, 3).float()
-                else:
-                    B_msa, M, L_msa = msa.shape
-                    msa_oh = F.one_hot(
-                        msa.permute(0, 2, 1).long(), num_classes=NUM_RES_TYPES
-                    ).float()  # [B, L, M, 33]
-                msa_attn = (
-                    msa_attention_mask.permute(0, 2, 1).float()
-                    if msa_attention_mask is not None
-                    else tok_mask[:, :, None].expand(-1, -1, M).float()
+                msa_attention_mask = maybe_apply_msa_column_masking(
+                    msa_attention_mask, rate=msa_column_mask_rate
                 )
-                # Bias-free MSAEncoder.embed requires zeroed padding.
-                msa_oh = msa_oh * msa_attn.unsqueeze(-1)
-                hd = (
-                    has_deletion.permute(0, 2, 1).float()
-                    if has_deletion is not None
-                    else torch.zeros(B_msa, L_msa, M, device=msa.device)
-                )
-                dv = (
-                    deletion_value.permute(0, 2, 1).float()
-                    if deletion_value is not None
-                    else torch.zeros(B_msa, L_msa, M, device=msa.device)
-                )
-                _msa_kwargs = dict(
+                _msa_inputs = dict(
+                    msa=msa,
+                    msa_attention_mask=msa_attention_mask,
+                    has_deletion=has_deletion,
+                    deletion_value=deletion_value,
                     x_inputs=x_inputs,
-                    msa_oh=msa_oh,
-                    has_deletion=hd,
-                    deletion_value=dv,
-                    msa_attention_mask=msa_attn,
+                    max_depth=msa_max_depth,
+                    subsample_enabled=msa_subsample_at_inference,
                 )
 
             # Expand 1-D token mask → 2-D pair mask for folding trunk
@@ -983,8 +970,50 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
             prev_disto_probs: Tensor | None = None
             for loop_num in range(n_loops + 1):
                 z = z_init + self.pair_loop_proj(z)
-                if _msa_kwargs is not None and self.msa_encoder is not None:
-                    z = z + self.msa_encoder(x_pair=z, **_msa_kwargs).to(z.dtype)
+                if _msa_inputs is not None and self.msa_encoder is not None:
+                    # Fresh row subsample each iteration (column mask was applied
+                    # once in forward, before this loop).
+                    msa_i, mask_i, hd_i, dv_i = maybe_subsample_msa(
+                        _msa_inputs["msa"],
+                        _msa_inputs["msa_attention_mask"],
+                        _msa_inputs["has_deletion"],
+                        _msa_inputs["deletion_value"],
+                        max_depth=_msa_inputs["max_depth"],
+                        enabled=_msa_inputs["subsample_enabled"],
+                    )
+                    if msa_i.dim() == 4:
+                        B_msa, M, L_msa, _ = msa_i.shape
+                        msa_oh = msa_i.permute(0, 2, 1, 3).float()
+                    else:
+                        B_msa, M, L_msa = msa_i.shape
+                        msa_oh = F.one_hot(
+                            msa_i.permute(0, 2, 1).long(), num_classes=NUM_RES_TYPES
+                        ).float()  # [B, L, M, 33]
+                    msa_attn = (
+                        mask_i.permute(0, 2, 1).float()
+                        if mask_i is not None
+                        else tok_mask[:, :, None].expand(-1, -1, M).float()
+                    )
+                    # Bias-free MSAEncoder.embed requires zeroed padding.
+                    msa_oh = msa_oh * msa_attn.unsqueeze(-1)
+                    hd = (
+                        hd_i.permute(0, 2, 1).float()
+                        if hd_i is not None
+                        else torch.zeros(B_msa, L_msa, M, device=msa_i.device)
+                    )
+                    dv = (
+                        dv_i.permute(0, 2, 1).float()
+                        if dv_i is not None
+                        else torch.zeros(B_msa, L_msa, M, device=msa_i.device)
+                    )
+                    z = z + self.msa_encoder(
+                        x_pair=z,
+                        x_inputs=_msa_inputs["x_inputs"],
+                        msa_oh=msa_oh,
+                        has_deletion=hd,
+                        deletion_value=dv,
+                        msa_attention_mask=msa_attn,
+                    ).to(z.dtype)
                 z = self.folding_trunk(z, pair_attention_mask=pair_mask)
 
                 # Loop early-exit
