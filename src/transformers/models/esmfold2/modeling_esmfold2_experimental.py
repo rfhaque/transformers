@@ -787,6 +787,9 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
         atom_attention_mask: Tensor,
         atom_to_token: Tensor,
         distogram_atom_idx: Tensor,
+        disto_cond: Tensor | None = None,
+        disto_cond_mask: Tensor | None = None,
+        disto_cond_scale: float = 1.0,
         # MSA features
         deletion_mean: Tensor | None = None,
         msa: Tensor | None = None,
@@ -918,6 +921,21 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
             )
             token_bonds_encoding = self.token_bonds(token_bonds.float())
             z_init = z_init + relative_position_encoding + token_bonds_encoding
+            disto_cond_encoding: Tensor | None = None
+            if disto_cond is not None and disto_cond_mask is not None:
+                disto_cond_encoding = F.embedding(
+                    disto_cond.long().clamp(
+                        min=0, max=self.distogram_head.out_features - 1
+                    ),
+                    self.distogram_head.weight,
+                )
+                disto_cond_encoding = disto_cond_encoding * disto_cond_mask.unsqueeze(
+                    -1
+                ).to(disto_cond_encoding.dtype)
+                disto_cond_encoding = float(disto_cond_scale) * disto_cond_encoding.to(
+                    z_init.dtype
+                )
+                z_init = z_init + disto_cond_encoding
 
             # 4. Language model integration
             if (
@@ -970,6 +988,8 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
             prev_disto_probs: Tensor | None = None
             for loop_num in range(n_loops + 1):
                 z = z_init + self.pair_loop_proj(z)
+                if disto_cond_encoding is not None:
+                    z = z + disto_cond_encoding.to(z.dtype)
                 if _msa_inputs is not None and self.msa_encoder is not None:
                     # Fresh row subsample each iteration (column mask was applied
                     # once in forward, before this loop).

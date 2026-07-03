@@ -756,6 +756,7 @@ class ESMFold2Model(PreTrainedModel):
         z: Tensor,
         z_init: Tensor,
         lm_z: Tensor | None,
+        disto_cond_encoding: Tensor | None,
         _msa_inputs: dict | None,
         pair_mask: Tensor,
         a: Tensor,
@@ -841,6 +842,11 @@ class ESMFold2Model(PreTrainedModel):
             if refined_lm_z is not None:
                 z_inject_pair = z_inject_pair + refined_lm_z.to(z_inject_pair.dtype)
 
+            if disto_cond_encoding is not None:
+                z_inject_pair = z_inject_pair + disto_cond_encoding.to(
+                    z_inject_pair.dtype
+                )
+
             injected_pair = self.parcae_input_norm(z_inject_pair)
             z = a * z + F.linear(injected_pair.to(z.dtype), b_mat)
             z = self.folding_trunk(z, pair_attention_mask=pair_mask)
@@ -867,6 +873,9 @@ class ESMFold2Model(PreTrainedModel):
         atom_attention_mask: Tensor,
         atom_to_token: Tensor,
         distogram_atom_idx: Tensor,
+        disto_cond: Tensor | None = None,
+        disto_cond_mask: Tensor | None = None,
+        disto_cond_scale: float = 1.0,
         deletion_mean: Tensor | None = None,
         msa: Tensor | None = None,
         has_deletion: Tensor | None = None,
@@ -960,6 +969,21 @@ class ESMFold2Model(PreTrainedModel):
             )
             token_bonds_encoding = self.token_bonds(token_bonds.float())
             z_init = z_init + relative_position_encoding + token_bonds_encoding
+            disto_cond_encoding: Tensor | None = None
+            if disto_cond is not None and disto_cond_mask is not None:
+                disto_cond_encoding = F.embedding(
+                    disto_cond.long().clamp(
+                        min=0, max=self.distogram_head.out_features - 1
+                    ),
+                    self.distogram_head.weight,
+                )
+                disto_cond_encoding = disto_cond_encoding * disto_cond_mask.unsqueeze(
+                    -1
+                ).to(disto_cond_encoding.dtype)
+                disto_cond_encoding = float(disto_cond_scale) * disto_cond_encoding.to(
+                    z_init.dtype
+                )
+                z_init = z_init + disto_cond_encoding
 
             if (
                 lm_hidden_states is None
@@ -1014,6 +1038,7 @@ class ESMFold2Model(PreTrainedModel):
                 z=z,
                 z_init=z_init,
                 lm_z=lm_z,
+                disto_cond_encoding=disto_cond_encoding,
                 _msa_inputs=_msa_inputs,
                 pair_mask=pair_mask,
                 a=a,
